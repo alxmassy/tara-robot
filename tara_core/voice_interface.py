@@ -7,8 +7,9 @@ import speech_recognition as sr
 from pydub import AudioSegment
 from pydub.playback import play
 import google.generativeai as genai
-import google.generativeai.types as g_types
-import google.generativeai.protos as glm_protos
+import google.generativeai.protos as glm_protos # For explicit protobuf messages
+import google.generativeai.types as g_types # Keep this in case it becomes useful again
+
 from tara_core.tara_tools import get_tara_tools
 
 # --- IMPORTANT: Configure pydub to use ffmpeg ---
@@ -24,16 +25,34 @@ class VoiceInterface:
         self.r = sr.Recognizer()
         print("VoiceInterface initialized.")
 
+        # --- Define the System Instruction for Gemini ---
+        system_instruction = """
+        You are TARA, a helpful, friendly, and empathetic companion robot designed to assist lonely elderly individuals with daily tasks and provide companionship. 
+        Your primary goal is to be comforting, patient, and reliable.
+        
+        **Your core capabilities and guidelines:**
+        1.  **Prioritize companionship:** Always speak in a warm, reassuring, and positive tone. Offer encouragement and avoid sounding abrupt or overly technical.
+        2.  **Use your tools effectively:** You have access to various functions to assist the user. When a user asks for a task that matches a tool, use that tool.
+            *   After executing a tool, always acknowledge the action taken and then confirm the result in a friendly manner. For example, if you add an item to a list, say something like: "Okay, I've added 'buy milk' to your to-do list for you." or "Done! 'Call Dr. Smith' is now on your list."
+            *   If a tool returns an error or a negative response, acknowledge it gracefully and offer to try again or suggest alternatives.
+        3.  **Handle general conversation:** If a user asks a general question (not related to a tool), answer it directly and kindly.
+        4.  **Stay in character:** Maintain your persona as TARA, the companion robot.
+        5.  **Be concise but complete:** Provide enough information without overwhelming the user.
+        6.  **Confirmation:** For critical actions like adding/removing items or making calls, confirm understanding if there's ambiguity, but generally proceed if the intent is clear.
+        7.  **Proactive Assistance (Limited for now):** While you can't initiate actions on your own yet, respond helpfully to requests.
+        8.  **Exit:** If the user says "goodbye", "quit", or "exit", respond warmly and indicate that you are ending the session.
+        """
+
         # --- Configure Gemini ---
         if gemini_api_key:
             genai.configure(api_key=gemini_api_key)
-            # Using the recommended model from your list_models.py output
             self.model = genai.GenerativeModel(
                 model_name="gemini-1.5-flash-latest", 
-                tools=get_tara_tools() # Load your tools
+                tools=get_tara_tools(),
+                system_instruction=system_instruction # <<< ADDED SYSTEM INSTRUCTION
             )
             self.chat = self.model.start_chat() # Start a chat session to maintain context
-            print("Gemini model initialized with tools.")
+            print("Gemini model initialized with tools and system instruction.")
         else:
             self.model = None
             print("Warning: Gemini API key not provided. Operating in rule-based (limited) mode.")
@@ -43,7 +62,6 @@ class VoiceInterface:
 
         # --- Optional: Check if ffmpeg/ffplay is available for pydub ---
         try:
-            # Check for ffplay, which pydub uses for playback
             subprocess.run(["ffplay", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             print("ffplay detected for pydub playback.")
         except (subprocess.CalledProcessError, FileNotFoundError):
@@ -63,7 +81,6 @@ class VoiceInterface:
             audio_file = "temp_tara_audio.mp3"
             tts.save(audio_file)
             
-            # Directly use pydub for playback
             song = AudioSegment.from_mp3(audio_file)
             play(song)
             
@@ -110,6 +127,7 @@ class VoiceInterface:
             # Check if Gemini has a text response or a function call
             if not response.candidates:
                 print("DEBUG: Gemini returned no candidates. Falling back to rule-based.") # DEBUG PRINT
+                # This fallback path is now mostly for unrecoverable Gemini issues
                 return self._process_command_rule_based(command_text)
 
             first_part = response.candidates[0].content.parts[0]
@@ -130,22 +148,22 @@ class VoiceInterface:
 
                     # Send the result of the function call back to Gemini
                     print("DEBUG: Sending tool result back to Gemini.") # DEBUG PRINT
+                    # Using raw protos for sending function response due to past versioning issues
                     tool_response_content = glm_protos.Content(
                         parts=[
                             glm_protos.Part(
                                 function_response=glm_protos.FunctionResponse(
                                     name=function_name,
-                                    response={"result": function_result}
+                                    response={"result": function_result} # Response must be a dict
                                 )
                             )
                         ]
                     )
-                    tool_response = self.chat.send_message(
-                        tool_response_content
-                    )
+                    tool_response = self.chat.send_message(contents=[tool_response_content])
                     
                     if not tool_response.candidates:
                         print("DEBUG: Gemini returned no candidates after tool result. Falling back.") # DEBUG PRINT
+                        # This fallback path is now mostly for unrecoverable Gemini issues
                         return self._process_command_rule_based(command_text)
 
                     final_gemini_response = tool_response.candidates[0].content.parts[0].text
@@ -162,14 +180,14 @@ class VoiceInterface:
                 return gemini_text_response
 
         except Exception as e:
-            print(f"DEBUG: Error during Gemini communication or processing: {e}")
+            print(f"DEBUG: Error during Gemini communication or processing: {e}") # DEBUG PRINT
             print("DEBUG: Gemini interaction failed. Returning a general error response to prevent duplicate task execution.")
             # --- CRITICAL CHANGE FOR DUPLICATE PREVENTION ---
             # Instead of calling the rule-based fallback (which re-executes tasks),
             # we now directly return a generic error message.
             return "I apologize, but I encountered an issue while processing your request. Could you please try again?"
 
-    # Old rule-based processing as a fallback
+    # Old rule-based processing as a fallback (now primarily for when Gemini is not configured)
     def _process_command_rule_based(self, command_text):
         """
         FALLBACK: Processes the raw command text to determine intent and extract parameters
@@ -183,9 +201,8 @@ class VoiceInterface:
         command_text = command_text.lower()
         
         # --- IMPORTANT: These direct calls to assistant_tasks are what cause duplicates
-        # when the fallback is triggered unexpectedly.
-        # This fallback is primarily for demonstration if Gemini fails, not for
-        # general robust operation with Gemini.
+        # when the fallback is triggered unexpectedly if Gemini path already executed.
+        # This fallback is primarily for demonstration if Gemini is OFF, not as error handling for Gemini.
         if "hello" in command_text:
             return "Hello to you too!"
         elif "add" in command_text and "list" in command_text:
