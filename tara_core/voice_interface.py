@@ -6,6 +6,10 @@ from gtts import gTTS
 import speech_recognition as sr
 from pydub import AudioSegment
 from pydub.playback import play
+import google.generativeai as genai
+import google.generativeai.types as g_types
+import google.generativeai.protos as glm_protos
+from tara_core.tara_tools import get_tara_tools
 
 # --- IMPORTANT: Configure pydub to use ffmpeg ---
 # Set the path to ffmpeg/ffplay if they are not in your system's PATH.
@@ -16,10 +20,26 @@ AudioSegment.ffmpeg = "/usr/bin/ffmpeg"
 AudioSegment.ffprobe = "/usr/bin/ffprobe"
 
 class VoiceInterface:
-    def __init__(self):
-        # Initialize the recognizer for STT
+    def __init__(self, assistant_tasks, gemini_api_key=None):
         self.r = sr.Recognizer()
         print("VoiceInterface initialized.")
+
+        # --- Configure Gemini ---
+        if gemini_api_key:
+            genai.configure(api_key=gemini_api_key)
+            # Using the recommended model from your list_models.py output
+            self.model = genai.GenerativeModel(
+                model_name="gemini-1.5-flash-latest", 
+                tools=get_tara_tools() # Load your tools
+            )
+            self.chat = self.model.start_chat() # Start a chat session to maintain context
+            print("Gemini model initialized with tools.")
+        else:
+            self.model = None
+            print("Warning: Gemini API key not provided. Operating in rule-based (limited) mode.")
+        
+        self.assistant_tasks = assistant_tasks # Store reference to the task executor
+
 
         # --- Optional: Check if ffmpeg/ffplay is available for pydub ---
         try:
@@ -43,9 +63,9 @@ class VoiceInterface:
             audio_file = "temp_tara_audio.mp3"
             tts.save(audio_file)
             
-            # Directly use pydub for playback, as it's proven to work
+            # Directly use pydub for playback
             song = AudioSegment.from_mp3(audio_file)
-            play(song) # This uses the AudioSegment.converter/ffmpeg path configured above
+            play(song)
             
             os.remove(audio_file) # Clean up the temporary file
         except Exception as e:
@@ -62,75 +82,125 @@ class VoiceInterface:
         print("\nTARA is listening (type your command and press Enter):")
         
         # --- MOCKING MIC INPUT FOR NOW (for hackathon/WSL demo) ---
-        # Replace this with actual microphone input later when hardware is available
         user_input = input("You say: ")
         print("Processing...")
-        return user_input.strip() # Return typed text for testing
-        
-        # --- UNCOMMENT BELOW WHEN YOU HAVE A MICROPHONE & READY TO TEST ---
-        # try:
-        #     with sr.Microphone() as source:
-        #         self.r.adjust_for_ambient_noise(source) # Optional: adjust for ambient noise
-        #         print("TARA: Say something!")
-        #         audio = self.r.listen(source)
-        #     
-        #     print("TARA: Recognizing...")
-        #     command = self.r.recognize_google(audio) # Using Google Web Speech API
-        #     print(f"You said: {command}")
-        #     return command
-        # except sr.UnknownValueError:
-        #     print("TARA could not understand audio. Please try again.")
-        #     return None
-        # except sr.RequestError as e:
-        #     print(f"TARA: Could not request results from Google Speech Recognition service; {e}")
-        #     print("Please check your internet connection.")
-        #     return None
-        # except Exception as e: # Catch other potential errors like no microphone
-        #     print(f"Error during STT (Is microphone connected/configured?): {e}")
-        #     print("Falling back to typed input for demonstration.")
-        #     return input("You say (typed fallback): ").strip() # Fallback to typing if mic fails
+        return user_input.strip()
+
 
     def process_command(self, command_text):
         """
-        Processes the raw command text to determine intent and extract parameters.
-        Returns (intent, parameters).
+        Processes the command text using Gemini for intent recognition and function calling.
+        If Gemini calls a tool, executes it and sends result back to Gemini for response generation.
+        Returns the final conversational response from Gemini.
         """
+        print(f"DEBUG: Entered process_command with text: '{command_text}'") # DEBUG PRINT
+
+        if self.model is None:
+            print("DEBUG: Calling rule-based fallback (Gemini not configured or failed initialization).") # DEBUG PRINT
+            return self._process_command_rule_based(command_text)
+
+        if not command_text:
+            print("DEBUG: No command text received.") # DEBUG PRINT
+            return "I didn't hear anything. Could you please repeat that?"
+
+        try:
+            print(f"DEBUG: Sending command to Gemini: '{command_text}'") # DEBUG PRINT
+            response = self.chat.send_message(command_text)
+            
+            # Check if Gemini has a text response or a function call
+            if not response.candidates:
+                print("DEBUG: Gemini returned no candidates. Falling back to rule-based.") # DEBUG PRINT
+                return self._process_command_rule_based(command_text)
+
+            first_part = response.candidates[0].content.parts[0]
+
+            if first_part.function_call:
+                function_call = first_part.function_call
+                function_name = function_call.name
+                kwargs = {k: v for k, v in function_call.args.items()}
+
+                print(f"DEBUG: Gemini wants to call function: {function_name} with args: {kwargs}") # DEBUG PRINT
+
+                if hasattr(self.assistant_tasks, function_name):
+                    local_function = getattr(self.assistant_tasks, function_name)
+                    
+                    # --- THIS IS WHERE THE FUNCTION IS EXECUTED THE FIRST TIME VIA GEMINI ---
+                    function_result = local_function(**kwargs)
+                    print(f"DEBUG: Local function executed. Result: '{function_result}'") # DEBUG PRINT
+
+                    # Send the result of the function call back to Gemini
+                    print("DEBUG: Sending tool result back to Gemini.") # DEBUG PRINT
+                    tool_response_content = glm_protos.Content(
+                        parts=[
+                            glm_protos.Part(
+                                function_response=glm_protos.FunctionResponse(
+                                    name=function_name,
+                                    response={"result": function_result}
+                                )
+                            )
+                        ]
+                    )
+                    tool_response = self.chat.send_message(
+                        tool_response_content
+                    )
+                    
+                    if not tool_response.candidates:
+                        print("DEBUG: Gemini returned no candidates after tool result. Falling back.") # DEBUG PRINT
+                        return self._process_command_rule_based(command_text)
+
+                    final_gemini_response = tool_response.candidates[0].content.parts[0].text
+                    print(f"DEBUG: Final Gemini text response after tool call: '{final_gemini_response}'") # DEBUG PRINT
+                    return final_gemini_response
+                else:
+                    print(f"DEBUG: Gemini called unknown function: {function_name}") # DEBUG PRINT
+                    return f"TARA: I understand you want to '{function_name}', but I don't have that capability yet."
+
+            else:
+                # Gemini returned a direct text response
+                gemini_text_response = first_part.text
+                print(f"DEBUG: Gemini returned direct text: '{gemini_text_response}'") # DEBUG PRINT
+                return gemini_text_response
+
+        except Exception as e:
+            print(f"DEBUG: Error during Gemini communication or processing: {e}")
+            print("DEBUG: Gemini interaction failed. Returning a general error response to prevent duplicate task execution.")
+            # --- CRITICAL CHANGE FOR DUPLICATE PREVENTION ---
+            # Instead of calling the rule-based fallback (which re-executes tasks),
+            # we now directly return a generic error message.
+            return "I apologize, but I encountered an issue while processing your request. Could you please try again?"
+
+    # Old rule-based processing as a fallback
+    def _process_command_rule_based(self, command_text):
+        """
+        FALLBACK: Processes the raw command text to determine intent and extract parameters
+        using old rule-based logic. Used if Gemini is not configured or fails.
+        """
+        print(f"DEBUG: Executing rule-based fallback for command: '{command_text}'") # DEBUG PRINT
+        
         if command_text is None:
-            return "unknown", {}
+            return "I didn't hear anything."
 
-        command_text = command_text.lower() # Convert to lowercase for easier parsing
-
-        # --- Basic Intent Recognition ---
-        if "hello" in command_text or "hi tara" in command_text:
-            return "greet", {}
-        elif "how are you" in command_text:
-            return "check_mood", {}
-        elif "add" in command_text and ("to do" in command_text or "list" in command_text):
-            # Example: "add take medicine to my to do list"
-            parts = command_text.split("add ", 1)
-            if len(parts) > 1:
-                item_part = parts[1]
-                # Further refine to remove common trailing phrases
-                item = item_part.replace("to my to do list", "").replace("to my list", "").strip()
-                item = item.replace("to do", "").strip() # Catches "add x to do"
-                return "add_todo", {"item": item}
-            return "add_todo", {"item": "something"} # Fallback if no item found
-        elif "play music" in command_text or "play some music" in command_text:
-            return "play_music", {}
+        command_text = command_text.lower()
+        
+        # --- IMPORTANT: These direct calls to assistant_tasks are what cause duplicates
+        # when the fallback is triggered unexpectedly.
+        # This fallback is primarily for demonstration if Gemini fails, not for
+        # general robust operation with Gemini.
+        if "hello" in command_text:
+            return "Hello to you too!"
+        elif "add" in command_text and "list" in command_text:
+            item = command_text.replace("add", "").replace("to list", "").strip()
+            if not item: item = "something" 
+            return self.assistant_tasks.add_todo(item) # Direct call to assistant_tasks
+        elif "read list" in command_text:
+            return self.assistant_tasks.read_todo_list()
+        elif "play music" in command_text:
+            return self.assistant_tasks.play_music()
         elif "stop music" in command_text:
-            return "stop_music", {}
-        elif "call" in command_text:
-            # Example: "call mom"
-            parts = command_text.split("call ", 1)
-            if len(parts) > 1:
-                person = parts[1].strip()
-                return "call_person", {"person": person}
-            return "call_person", {"person": "someone"} # Fallback if no person found
-        elif "thank you" in command_text or "thanks" in command_text:
-            return "thank_you", {}
-        elif "quit" in command_text or "exit" in command_text or "goodbye" in command_text:
-            return "exit_program", {}
-        
-        # Add more intents as you develop features
-        
-        return "unknown", {}
+            return self.assistant_tasks.stop_music()
+        elif "what time is it" in command_text:
+            return self.assistant_tasks.get_current_time()
+        elif "goodbye" in command_text or "exit" in command_text:
+            return "Goodbye! Have a wonderful day."
+        else:
+            return "I'm sorry, in this basic mode, I didn't understand that. Could you try 'add [item] to list' or 'read list'?"

@@ -53,3 +53,9 @@ htmlcov/
 .cache
 coverage.xml
 *.cover
+
+# Data
+tara_data/todo_list.json
+
+# Environment variables
+.env
