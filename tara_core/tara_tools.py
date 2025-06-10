@@ -104,6 +104,28 @@ def get_tara_tools():
                         "type": "object",
                         "properties": {}
                     }
+                },
+                {
+                    "name": "get_recent_events",
+                    "description": "Retrieves and summarizes the most recent events, activities, or interactions from TARA's memory log. Use this when the user asks about 'recent actions', 'what happened lately', 'our last few conversations', 'summarize recent activity', or 'what did I ask a moment/few minutes ago'.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "count": {"type": "number", "description": "The number of recent events to retrieve. Default is 5. Max 20.", "nullable": True}
+                        }
+                    }
+                },
+                {
+                    "name": "search_events",
+                    "description": "Searches TARA's memory log for past events containing specific keywords or phrases. Use this when the user asks about a specific past task, reminder, or conversation (e.g., 'tell me about the call I made', 'did I add anything about groceries', 'what about the medicine reminder', 'what did I ask about X').",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query_keywords": {"type": "array", "items": {"type": "string"}, "description": "A list of one or more keywords or phrases to search for in the memory log. For example, ['milk', 'doctor appointment', 'call mom']."},
+                            "limit": {"type": "number", "description": "The maximum number of matching events to return. Default is 10.", "nullable": True}
+                        },
+                        "required": ["query_keywords"]
+                    }
                 }
             ]
         }

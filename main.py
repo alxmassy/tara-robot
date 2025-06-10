@@ -1,60 +1,77 @@
 # main.py
 
 import os
-from dotenv import load_dotenv # NEW: Import load_dotenv
+from dotenv import load_dotenv
 
 from tara_core.voice_interface import VoiceInterface
 from tara_core.assistant_tasks import AssistantTasks
+from tara_core.memory_manager import MemoryManager 
+# RobotControl and VisionSystem imports are removed as requested
 
-# --- NEW: Load environment variables from .env file ---
+# --- Load environment variables from .env file ---
 load_dotenv()
 
-# --- NEW: Get Gemini API Key from environment variable ---
+# --- Get Gemini API Key from environment variable ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 
-# Optional: Add a check for the API key, especially for hackathon demo robustness
-if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
-    print("ERROR: GEMINI_API_KEY not found or is still default. Please set it in your .env file or environment variables.")
+if not GEMINI_API_KEY:
+    print("ERROR: GEMINI_API_KEY not found or is empty. Please set it in your .env file or environment variables.")
     # For a hackathon, you might want to exit here or explicitly fall back to rule-based mode
     # For now, we'll let it proceed and VoiceInterface will handle the 'None' case.
-    # exit(1) # Uncomment to exit if key is missing
+    # exit(1) 
+
 
 def main():
     print("Starting TARA's core...")
     
-    tara_assistant = AssistantTasks() # Initialize AssistantTasks first
-    
-    # Pass assistant_tasks instance and API key to VoiceInterface
-    tara_voice = VoiceInterface(assistant_tasks=tara_assistant, gemini_api_key=GEMINI_API_KEY) 
+    # Initialize core components
+    tara_assistant = AssistantTasks()
+    tara_memory = MemoryManager() 
 
-    # Initial greeting from TARA
+    # Create a dictionary to map tool names to their corresponding object methods.
+    # This allows Gemini to "call" methods on any of these objects.
+    # We exclude internal/private methods (startswith('_')) and 'log_event' for memory.
+    tool_executor_map = {
+        **{name: getattr(tara_assistant, name) for name in dir(tara_assistant) if callable(getattr(tara_assistant, name)) and not name.startswith('_')},
+        # RobotControl and VisionSystem methods are intentionally omitted here as per your request.
+        # Ensure MemoryManager methods ARE included:
+        **{name: getattr(tara_memory, name) for name in dir(tara_memory) if callable(getattr(tara_memory, name)) and not name.startswith('_') and name != 'log_event'}, 
+    }
+
+    # Initialize VoiceInterface, passing all necessary components
+    tara_voice = VoiceInterface(
+        assistant_tasks=tool_executor_map, 
+        memory_manager=tara_memory,       
+        gemini_api_key=GEMINI_API_KEY
+    ) 
+
     tara_voice.speak("Hello there! I am TARA, your personal companion robot. How can I assist you today?")
 
     while True:
-        # Listen for a command from the user (currently typed input)
         command_text = tara_voice.listen_for_command()
         
-        # Use Gemini to process the command and get a conversational response
-        response_text = tara_voice.process_command(command_text)
-
-        # Check if the user explicitly asked to exit (e.g., "quit", "goodbye")
-        # OR if Gemini's response contains clear exit phrases.
+        # Log the user's raw command
+        tara_memory.log_event("user_command", {"command": command_text}) 
+        
+        # If the user explicitly asks to quit, handle it here.
         lower_command_text = command_text.lower()
-        lower_response_text = response_text.lower()
-
         if ("quit" in lower_command_text or 
             "exit" in lower_command_text or 
             "goodbye" in lower_command_text):
-            # If the user explicitly asks to quit, we ensure TARA says goodbye
-            # and then we exit. We don't rely solely on Gemini's exact wording.
-            if not ("goodbye" in lower_response_text or "farewell" in lower_response_text):
-                 tara_voice.speak("Goodbye! Have a wonderful day.") # Ensure a goodbye message is spoken
-            else:
-                 tara_voice.speak(response_text) # Speak Gemini's goodbye
-            break # Exit the loop
+            
+            response_text = tara_voice.process_command(command_text)
+            tara_voice.speak(response_text) 
 
-        # Otherwise, just speak Gemini's response
+            tara_memory.log_event("tara_response", {"response": response_text, "exit_triggered": True})
+            break # Exit the loop and end the program
+            
+        # Otherwise, process the command with Gemini
+        response_text = tara_voice.process_command(command_text)
         tara_voice.speak(response_text)
+
+        # Ensure we log every response TARA gives
+        tara_memory.log_event("tara_response", {"response": response_text})
+
 
 if __name__ == "__main__":
     main()
