@@ -1,0 +1,21 @@
+# Audio and Speech
+gTTS==2.3.2
+SpeechRecognition==3.10.0
+pydub==0.25.1
+
+# Google AI
+google-generativeai==0.3.1
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# File I/O and Utilities
+jsonlines==3.1.0
+
+# System Dependencies (need to be installed separately)
+# ffmpeg - install via: sudo apt-get install ffmpeg
+
+# Optional dependencies
+# PyAudio is required for microphone input with SpeechRecognition
+# pip install pyaudio
+# On Linux: sudo apt-get install portaudio19-dev python3-pyaudio
